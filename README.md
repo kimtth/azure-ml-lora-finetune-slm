@@ -135,43 +135,6 @@ chmod +x scripts/generate_requirements_uv.sh
 .\scripts\generate_requirements.ps1
 ```
 
-**Linux/Mac (Bash):**
-```bash
-chmod +x scripts/generate_requirements.sh
-./scripts/generate_requirements.sh
-```
-
-### Option 3: Manual Installation
-
-```bash
-# Create virtual environment
-python -m venv .venv
-
-# Windows
-.\.venv\Scripts\Activate.ps1
-
-# Linux/Mac
-source .venv/bin/activate
-
-# Install packages (latest compatible versions)
-pip install azure-ai-ml azure-identity azureml-mlflow \
-            transformers peft accelerate datasets \
-            torch trl rouge-score nltk evaluate \
-            mlflow pandas numpy pyyaml tqdm
-
-# Optional: Add bitsandbytes for GPU 4-bit quantization
-# pip install bitsandbytes
-
-# Generate requirements.txt
-pip freeze > environment/requirements.txt
-```
-
-### Option 2: Use Existing Requirements
-
-```bash
-pip install -r environment/requirements.txt
-```
-
 > 💡 **Note**: The scripts automatically generate `requirements.txt` and `conda.yaml` with your installed versions. Azure ML uses these files to setup the remote training environment.
 
 ## 🚀 Quick Start
