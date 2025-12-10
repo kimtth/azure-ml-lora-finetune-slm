@@ -5,45 +5,28 @@ This script submits an evaluation job to test the fine-tuned model on Azure ML.
 """
 
 import os
-import argparse
+import warnings
+import logging
 from pathlib import Path
 from azure.ai.ml import MLClient, command, Input
 from azure.ai.ml.entities import Environment
 from azure.identity import DefaultAzureCredential
 from azure.ai.ml.constants import AssetTypes
+from dotenv import load_dotenv
 
+# Suppress experimental class warnings and SDK debug logging
+warnings.filterwarnings("ignore", message=".*experimental class.*")
+logging.getLogger("azure.ai.ml").setLevel(logging.WARNING)
+logging.getLogger("azure.core").setLevel(logging.WARNING)
 
-def parse_args():
-    """Parse command line arguments."""
-    parser = argparse.ArgumentParser(description="Submit evaluation job to Azure ML")
-    
-    parser.add_argument(
-        "--model_path",
-        type=str,
-        required=True,
-        help="Azure ML path to fine-tuned model (e.g., azureml://jobs/<job-id>/outputs/model_output/final_model)",
-    )
-    parser.add_argument(
-        "--compute_name",
-        type=str,
-        default="gpu-cluster",
-        help="Name of compute cluster",
-    )
-    parser.add_argument(
-        "--experiment_name",
-        type=str,
-        default="lora-evaluation",
-        help="Experiment name",
-    )
-    
-    return parser.parse_args()
+load_dotenv()
 
 
 def get_ml_client():
     """Create and return MLClient instance."""
-    subscription_id = os.getenv("AZURE_SUBSCRIPTION_ID", "<your-subscription-id>")
-    resource_group = os.getenv("AZURE_RESOURCE_GROUP", "<your-resource-group>")
-    workspace_name = os.getenv("AZURE_WORKSPACE_NAME", "<your-workspace-name>")
+    subscription_id = os.getenv("AZURE_SUBSCRIPTION_ID")
+    resource_group = os.getenv("AZURE_RESOURCE_GROUP")
+    workspace_name = os.getenv("AZURE_WORKSPACE_NAME")
     
     ml_client = MLClient(
         credential=DefaultAzureCredential(),
@@ -56,42 +39,46 @@ def get_ml_client():
     return ml_client
 
 
-def get_environment(ml_client: MLClient):
-    """Get the existing environment or create if needed."""
+def create_or_update_environment(ml_client: MLClient):
+    """Create or update the evaluation environment."""
     env_name = "lora-finetune-env"
     
-    try:
-        # Try to get latest version
-        env = ml_client.environments.get(name=env_name, label="latest")
-        print(f"Using existing environment: {env.name}:{env.version}")
-        return f"{env.name}:{env.version}"
-    except Exception:
-        # Create if doesn't exist
-        conda_file_path = Path(__file__).parent.parent / "environment" / "conda.yaml"
-        
-        env = Environment(
-            name=env_name,
-            description="Environment for LoRA evaluation",
-            image="mcr.microsoft.com/azureml/curated/acft-hf-nlp-gpu:latest",
-            conda_file=str(conda_file_path),
-        )
-        
-        env = ml_client.environments.create_or_update(env)
-        print(f"Environment created: {env.name}:{env.version}")
-        return f"{env.name}:{env.version}"
-
-
-def prepare_test_data():
-    """Prepare test data input."""
-    data_dir = Path(__file__).parent.parent / "data"
+    # Path to conda.yaml
+    conda_file_path = Path(__file__).parent.parent / "environment" / "conda.yaml"
     
-    test_data = Input(
-        type=AssetTypes.URI_FILE,
-        path=str(data_dir / "validation.jsonl"),
+    env = Environment(
+        name=env_name,
+        description="Environment for LoRA fine-tuning and evaluation",
+        image="mcr.microsoft.com/azureml/curated/acft-hf-nlp-gpu:latest",
+        conda_file=str(conda_file_path),
     )
     
-    print("Test data prepared")
-    return test_data
+    env = ml_client.environments.create_or_update(env)
+    print(f"Environment: {env.name}:{env.version}")
+    
+    return f"{env.name}:{env.version}"
+
+
+def get_data_inputs(ml_client: MLClient):
+    """Get data inputs from blob storage via direct URIs."""
+    
+    # Get datastore info
+    default_datastore = ml_client.datastores.get_default()
+    
+    # Construct paths to uploaded data
+    blob_folder = "LocalUpload/lora-training-data"
+    
+    # Create Azure ML URIs that reference the blob storage paths
+    val_uri = f"azureml://subscriptions/{ml_client.subscription_id}/resourcegroups/{ml_client.resource_group_name}/workspaces/{ml_client.workspace_name}/datastores/{default_datastore.name}/paths/{blob_folder}/validation.jsonl"
+    
+    val_data = Input(
+        type=AssetTypes.URI_FILE,
+        path=val_uri,
+    )
+    
+    print("Evaluation data configured from blob storage")
+    print(f"  Test data: {blob_folder}/validation.jsonl")
+    return val_data
 
 
 def submit_evaluation_job(
@@ -99,11 +86,15 @@ def submit_evaluation_job(
     environment: str,
     model_path: str,
     test_data: Input,
-    compute_name: str,
-    experiment_name: str,
+    compute_name: str = None,
+    experiment_name: str = "lora-evaluation",
 ):
     """Submit the evaluation job to Azure ML."""
     
+    if compute_name is None:
+        compute_name = os.getenv("AZURE_COMPUTE_NAME", "gpu-cluster")
+    
+    # Path to evaluation script
     code_dir = Path(__file__).parent.parent / "src"
     
     # Load training config to get model name
@@ -111,6 +102,7 @@ def submit_evaluation_job(
     config_path = Path(__file__).parent.parent / "config" / "training_config.yaml"
     with open(config_path) as f:
         config = yaml.safe_load(f)
+    
     base_model = config['model']['name']
     
     # Configure evaluation command
@@ -118,7 +110,7 @@ def submit_evaluation_job(
         code=str(code_dir),
         command=(
             "python evaluate.py "
-            "--model_path ${{inputs.model_path}} "
+            f"--model_path {model_path} "
             f"--base_model {base_model} "
             "--test_data ${{inputs.test_data}} "
             "--output_dir ${{outputs.eval_output}} "
@@ -131,16 +123,11 @@ def submit_evaluation_job(
         environment=environment,
         compute=compute_name,
         inputs={
-            "model_path": Input(
-                type=AssetTypes.URI_FOLDER,
-                path=model_path,
-            ),
             "test_data": test_data,
         },
         outputs={
             "eval_output": {
                 "type": AssetTypes.URI_FOLDER,
-                "mode": "rw_mount",
             }
         },
         experiment_name=experiment_name,
@@ -164,7 +151,29 @@ def submit_evaluation_job(
 
 def main():
     """Main function to submit evaluation job."""
-    args = parse_args()
+    import argparse
+    
+    parser = argparse.ArgumentParser(description="Submit evaluation job to Azure ML")
+    parser.add_argument(
+        "--model_path",
+        type=str,
+        required=True,
+        help="Path to fine-tuned model (e.g., azureml://jobs/<job-id>/outputs/model_output)",
+    )
+    parser.add_argument(
+        "--compute_name",
+        type=str,
+        default=None,
+        help="Name of compute cluster (default: from .env AZURE_COMPUTE_NAME)",
+    )
+    parser.add_argument(
+        "--experiment_name",
+        type=str,
+        default="lora-evaluation",
+        help="Experiment name",
+    )
+    
+    args = parser.parse_args()
     
     print("=" * 80)
     print("Azure ML - Model Evaluation Job Submission")
@@ -174,13 +183,13 @@ def main():
     print("\n[1/4] Connecting to Azure ML workspace...")
     ml_client = get_ml_client()
     
-    # Get environment
-    print("\n[2/4] Getting environment...")
-    environment = get_environment(ml_client)
+    # Create/update environment
+    print("\n[2/4] Creating/updating environment...")
+    environment = create_or_update_environment(ml_client)
     
-    # Prepare test data
-    print("\n[3/4] Preparing test data...")
-    test_data = prepare_test_data()
+    # Get evaluation data
+    print("\n[3/4] Configuring evaluation data...")
+    test_data = get_data_inputs(ml_client)
     
     # Submit job
     print("\n[4/4] Submitting evaluation job...")
