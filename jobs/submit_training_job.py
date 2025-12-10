@@ -5,14 +5,24 @@ This script submits a LoRA fine-tuning job to Azure ML workspace.
 """
 
 import os
+import warnings
+import logging
 from pathlib import Path
 from azure.ai.ml import MLClient, command, Input
 from azure.ai.ml.entities import Environment
 from azure.identity import DefaultAzureCredential
 from azure.ai.ml.constants import AssetTypes
+from dotenv import load_dotenv
 
+# Suppress experimental class warnings and SDK debug logging
+warnings.filterwarnings("ignore", message=".*experimental class.*")
+logging.getLogger("azure.ai.ml").setLevel(logging.WARNING)
+logging.getLogger("azure.core").setLevel(logging.WARNING)
+
+load_dotenv()  # Load environment variables from .env file
 
 def get_ml_client():
+    
     """Create and return MLClient instance."""
     # Get configuration from environment variables or modify directly
     subscription_id = os.getenv("AZURE_SUBSCRIPTION_ID", "<your-subscription-id>")
@@ -50,23 +60,32 @@ def create_or_update_environment(ml_client: MLClient):
     return f"{env.name}:{env.version}"
 
 
-def upload_data():
-    """Upload training and validation data to workspace."""
-    data_dir = Path(__file__).parent.parent / "data"
+def get_data_inputs(ml_client: MLClient):
+    """Get data inputs from blob storage via direct URIs."""
     
-    # Upload training data
+    # Get datastore info
+    default_datastore = ml_client.datastores.get_default()
+    
+    # Construct paths to uploaded data
+    blob_folder = "LocalUpload/lora-training-data"
+    
+    # Create Azure ML URIs that reference the blob storage paths
+    train_uri = f"azureml://subscriptions/{ml_client.subscription_id}/resourcegroups/{ml_client.resource_group_name}/workspaces/{ml_client.workspace_name}/datastores/{default_datastore.name}/paths/{blob_folder}/train.jsonl"
+    val_uri = f"azureml://subscriptions/{ml_client.subscription_id}/resourcegroups/{ml_client.resource_group_name}/workspaces/{ml_client.workspace_name}/datastores/{default_datastore.name}/paths/{blob_folder}/validation.jsonl"
+    
     train_data = Input(
         type=AssetTypes.URI_FILE,
-        path=str(data_dir / "train.jsonl"),
+        path=train_uri,
     )
     
-    # Upload validation data
     val_data = Input(
         type=AssetTypes.URI_FILE,
-        path=str(data_dir / "validation.jsonl"),
+        path=val_uri,
     )
     
-    print("Data inputs prepared")
+    print("Data inputs configured from blob storage")
+    print(f"  Training data: {blob_folder}/train.jsonl")
+    print(f"  Validation data: {blob_folder}/validation.jsonl")
     return train_data, val_data
 
 
@@ -122,7 +141,6 @@ def submit_training_job(
         outputs={
             "model_output": {
                 "type": AssetTypes.URI_FOLDER,
-                "mode": "rw_mount",
             }
         },
         experiment_name=experiment_name,
@@ -158,9 +176,9 @@ def main():
     print("\n[2/4] Creating/updating environment...")
     environment = create_or_update_environment(ml_client)
     
-    # Upload data
-    print("\n[3/4] Preparing data inputs...")
-    train_data, val_data = upload_data()
+    # Get data inputs
+    print("\n[3/4] Configuring data inputs...")
+    train_data, val_data = get_data_inputs(ml_client)
     
     # Submit job
     print("\n[4/4] Submitting training job...")
@@ -172,12 +190,15 @@ def main():
         config = yaml.safe_load(f)
     model_name = config['model']['name'].split('/')[-1]
     
+    # Get compute name from environment or use default
+    compute_name = os.getenv("AZURE_COMPUTE_NAME", "phivmgpu")
+    
     job = submit_training_job(
         ml_client,
         environment,
         train_data,
         val_data,
-        compute_name="gpu-cluster",  # Change to your compute cluster name
+        compute_name=compute_name,
         experiment_name=f"lora-finetuning-{model_name}",
     )
     
