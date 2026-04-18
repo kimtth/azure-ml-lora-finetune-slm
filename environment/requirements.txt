@@ -80,7 +80,7 @@ msrest==0.7.1
 multidict==6.7.0
 multiprocess==0.70.18
 networkx==3.5
-nltk==3.9.2
+nltk==3.9.4
 numpy==2.3.4
 oauthlib==3.3.1
 opentelemetry-api==1.38.0
