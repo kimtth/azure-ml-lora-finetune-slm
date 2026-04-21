@@ -117,7 +117,7 @@ pydash==8.0.5
 pyjwt==2.10.1
 pyparsing==3.2.5
 python-dateutil==2.9.0.post0
-python-dotenv==1.2.1
+python-dotenv==1.2.2
 pytz==2025.2
 pywin32==311
 pyyaml==6.0.3
